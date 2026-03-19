@@ -12,7 +12,7 @@
 __global__ void __cluster_dims__(2, 1, 1)
 dsm_kernel(float* final_result, int num_itr) {
     auto cluster = cooperative_groups::this_cluster();
-    int rank = cluster.block_rank(); 
+    int rank = cluster.block_rank();
     int idx = threadIdx.x;
 
     extern __shared__ float smem[];
@@ -33,6 +33,7 @@ dsm_kernel(float* final_result, int num_itr) {
             float* producer_smem = cluster.map_shared_rank(smem, 0);
             value = producer_smem[0];
             value += 2.0f;
+            producer_smem[0]=value;
         }
 
         cluster.sync();
