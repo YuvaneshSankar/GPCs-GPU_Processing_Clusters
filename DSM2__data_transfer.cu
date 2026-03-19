@@ -9,8 +9,7 @@
     } \
 } while (0)
 
-__global__ void __cluster_dims__(2, 1, 1)
-dsm_kernel(float* final_result, int num_itr) {
+__global__ void __cluster_dims__(2, 1, 1) dsm_kernel(float* final_result, int num_itr) {
     auto cluster = cooperative_groups::this_cluster();
     int rank = cluster.block_rank();
     int idx = threadIdx.x;
@@ -19,21 +18,20 @@ dsm_kernel(float* final_result, int num_itr) {
 
     if (idx != 0) return;
 
-    float value = final_result[0];
 
     for (int i = 0; i < num_itr; i++) {
         if (rank == 0) {
-            value += 1.0f;
-            smem[0] = value;
+          float value = final_result[idx];
+          smem[idx] = value+1.0f;
         }
 
         cluster.sync();
 
         if (rank == 1) {
             float* producer_smem = cluster.map_shared_rank(smem, 0);
-            value = producer_smem[0];
-            value += 2.0f;
-            producer_smem[0]=value;
+            float current = producer_smem[idx];
+            current += 2.0f;
+            producer_smem[idx] = current;
         }
 
         cluster.sync();
@@ -41,7 +39,7 @@ dsm_kernel(float* final_result, int num_itr) {
 
     // Only consumer writes final value back to global memory
     if (rank == 1) {
-        final_result[0] = value;
+        final_result[0] = smem[idx];
     }
 }
 
