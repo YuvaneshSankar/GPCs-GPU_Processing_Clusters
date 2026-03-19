@@ -15,9 +15,9 @@ dsm_kernel(float* final_result, int num_itr) {
     int rank = cluster.block_rank();
     int idx = threadIdx.x;
 
-    extern __shared__ float smem[];   // producer block's shared memory
+    extern __shared__ float smem[];   // producer's shared memory
 
-    // Step 1: Producer copies the initial global array to shared memory (once)
+    // Initial copy: producer loads global array into shared memory (once)
     if (rank == 0) {
         for (int j = idx; j < 4096; j += blockDim.x) {
             smem[j] = final_result[j];
@@ -25,47 +25,49 @@ dsm_kernel(float* final_result, int num_itr) {
     }
     cluster.sync();
 
-    // Step 2: Repeat the handoff 10,000 times
+    // Repeat handoff num_itr times
     for (int i = 0; i < num_itr; i++) {
-        if (rank == 0) {  // producer block
+        if (rank == 0) {  // producer
             for (int j = idx; j < 4096; j += blockDim.x) {
-                smem[j] += 1.0f;          // add +1 to its own shared memory
+                smem[j] += 1.0f;
             }
         }
 
-        cluster.sync();   // make producer's writes visible to consumer
+        cluster.sync();
 
-        if (rank == 1) {  // consumer block
+        if (rank == 1) {  // consumer
             float* producer_smem = cluster.map_shared_rank(smem, 0);
             for (int j = idx; j < 4096; j += blockDim.x) {
-                producer_smem[j] += 2.0f;  // add +2 directly to producer's shared memory
+                producer_smem[j] += 2.0f;
             }
         }
 
-        cluster.sync();   // wait for consumer to finish
+        cluster.sync();
     }
 
-    // Step 3: Consumer copies final result back to global memory (once)
+    // Final copy back: consumer copies from producer's shared memory to global
     if (rank == 1) {
+        float* producer_smem = cluster.map_shared_rank(smem, 0);
         for (int j = idx; j < 4096; j += blockDim.x) {
-            final_result[j] = smem[j];   // read from producer's shared via map
+            final_result[j] = producer_smem[j];
         }
     }
 }
 
 int main() {
-    float* h_result = (float*)malloc(4096 * sizeof(float));
+    const int N = 4096;
+    float* h_result = (float*)malloc(N * sizeof(float));
     float* d_result = nullptr;
 
-    for (int i = 0; i < 4096; i++) h_result[i] = 1.0f;
+    for (int i = 0; i < N; i++) h_result[i] = 1.0f;
 
-    CUDA_CHECK(cudaMalloc(&d_result, 4096 * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(d_result, h_result, 4096 * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_result, N * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(d_result, h_result, N * sizeof(float), cudaMemcpyHostToDevice));
 
-    size_t shared_bytes = 4096 * sizeof(float);
+    size_t shared_bytes = N * sizeof(float);
 
     dim3 block(256, 1, 1);
-    dim3 grid(4, 1, 1);   // must be multiple of cluster size 2
+    dim3 grid(4, 1, 1);  // multiple of cluster size 2
 
     int num_itr = 10000;
 
@@ -75,6 +77,8 @@ int main() {
     CUDA_CHECK(cudaEventRecord(start));
 
     dsm_kernel<<<grid, block, shared_bytes>>>(d_result, num_itr);
+
+    CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaEventRecord(stop));
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -87,7 +91,7 @@ int main() {
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
-    CUDA_CHECK(cudaMemcpy(h_result, d_result, 4096 * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_result, d_result, N * sizeof(float), cudaMemcpyDeviceToHost));
 
     printf("Final value at index 0: %f (expected ~ %.0f)\n", h_result[0], 1.0f + 3.0f * num_itr);
 
