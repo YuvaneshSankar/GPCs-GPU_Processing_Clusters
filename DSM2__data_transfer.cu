@@ -9,15 +9,14 @@
     } \
 } while (0)
 
-__global__ void __cluster_dims__(2, 1, 1)
-dsm_kernel(float* final_result, int num_itr) {
+__global__ void dsm_kernel(float* final_result, int num_itr) {
     auto cluster = cooperative_groups::this_cluster();
     int rank = cluster.block_rank();
     int idx = threadIdx.x;
 
-    extern __shared__ float smem[];   // producer's shared memory
+    extern __shared__ float smem[];
 
-    // Initial copy: producer loads global array into shared memory (once)
+    // Initial load from global to producer shared
     if (rank == 0) {
         for (int j = idx; j < 4096; j += blockDim.x) {
             smem[j] = final_result[j];
@@ -25,9 +24,9 @@ dsm_kernel(float* final_result, int num_itr) {
     }
     cluster.sync();
 
-    // Repeat handoff num_itr times
+    // Repeated handoff
     for (int i = 0; i < num_itr; i++) {
-        if (rank == 0) {  // producer
+        if (rank == 0) {
             for (int j = idx; j < 4096; j += blockDim.x) {
                 smem[j] += 1.0f;
             }
@@ -35,7 +34,7 @@ dsm_kernel(float* final_result, int num_itr) {
 
         cluster.sync();
 
-        if (rank == 1) {  // consumer
+        if (rank == 1) {
             float* producer_smem = cluster.map_shared_rank(smem, 0);
             for (int j = idx; j < 4096; j += blockDim.x) {
                 producer_smem[j] += 2.0f;
@@ -45,7 +44,7 @@ dsm_kernel(float* final_result, int num_itr) {
         cluster.sync();
     }
 
-    // Final copy back: consumer copies from producer's shared memory to global
+    // Final copy back from producer shared to global
     if (rank == 1) {
         float* producer_smem = cluster.map_shared_rank(smem, 0);
         for (int j = idx; j < 4096; j += blockDim.x) {
@@ -67,16 +66,37 @@ int main() {
     size_t shared_bytes = N * sizeof(float);
 
     dim3 block(256, 1, 1);
-    dim3 grid(4, 1, 1);  // multiple of cluster size 2
+    dim3 grid(8, 1, 1);  // 8 blocks = 4 clusters of 2
 
     int num_itr = 10000;
+
+    // Print device info
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+    printf("Device: %s, SMs: %d, Shared mem/block: %zu KB\n", prop.name, prop.multiProcessorCount, prop.sharedMemPerBlock / 1024);
 
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
 
-    dsm_kernel<<<grid, block, shared_bytes>>>(d_result, num_itr);
+    // Runtime cluster configuration (more reliable)
+    cudaLaunchConfig_t config = {0};
+    config.gridDim = grid;
+    config.blockDim = block;
+    config.sharedMemBytes = shared_bytes;
+
+    cudaLaunchAttribute attr;
+    attr.attr = cudaLaunchAttributeClusterDimension;
+    attr.val.clusterDim.x = 2;
+    attr.val.clusterDim.y = 1;
+    attr.val.clusterDim.z = 1;
+    config.attrs = &attr;
+    config.numAttrs = 1;
+
+    CUDA_CHECK(cudaLaunchKernelEx(&config, dsm_kernel, d_result, num_itr));
 
     CUDA_CHECK(cudaGetLastError());
 
@@ -91,6 +111,7 @@ int main() {
     CUDA_CHECK(cudaEventDestroy(start));
     CUDA_CHECK(cudaEventDestroy(stop));
 
+    CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(h_result, d_result, N * sizeof(float), cudaMemcpyDeviceToHost));
 
     printf("Final value at index 0: %f (expected ~ %.0f)\n", h_result[0], 1.0f + 3.0f * num_itr);
