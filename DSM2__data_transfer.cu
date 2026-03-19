@@ -82,21 +82,9 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&stop));
     CUDA_CHECK(cudaEventRecord(start));
 
-    // Runtime cluster configuration (more reliable)
-    cudaLaunchConfig_t config = {0};
-    config.gridDim = grid;
-    config.blockDim = block;
-    config.sharedMemBytes = shared_bytes;
 
-    cudaLaunchAttribute attr;
-    attr.attr = cudaLaunchAttributeClusterDimension;
-    attr.val.clusterDim.x = 2;
-    attr.val.clusterDim.y = 1;
-    attr.val.clusterDim.z = 1;
-    config.attrs = &attr;
-    config.numAttrs = 1;
 
-    CUDA_CHECK(cudaLaunchKernelEx(&config, dsm_kernel, d_result, num_itr));
+    dsm_kernel<<<grid, block, shared_bytes>>>(d_result, num_itr);
 
     CUDA_CHECK(cudaGetLastError());
 
